@@ -87,3 +87,23 @@ liquor_cv_fc |>
 #The first forecast: January 2002 
 #The last forecast: December 2019
 #The ARIMA model forecasts most accurately; both metrics agree 
+
+liquor_errs <- liquor_cv_fc |>
+  as_tibble() |>
+  left_join(as_tibble(liquor) |> select(Month, actual = sales),
+            by = "Month") |>
+  mutate(e = actual - .mean) |>
+  select(Month, .model, e) |>
+  pivot_wider(names_from = .model, values_from = e)
+
+forecast::dm.test(liquor_errs$arima, liquor_errs$ets, h = 1, power = 2)
+
+forecast::dm.test(liquor_errs$arima, liquor_errs$snaive, h = 1, power = 2)
+
+#DM stat (ARIMA & ETS): -2.9062
+#p-value (ARIMA & ETS): 0.004042
+#DM stat (ARIMA & snaive): -10.755
+#p-value (ARIMA & snaive): < 2.2e-16
+#Both tests reject H0 meaning neither the ARIMA and ETS nor the 
+#ARIMA and snaive models have equal forecast accuracy
+#If I were the liquor store chain, I would use the ARIMA model
