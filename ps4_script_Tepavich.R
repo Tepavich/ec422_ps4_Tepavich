@@ -107,3 +107,19 @@ forecast::dm.test(liquor_errs$arima, liquor_errs$snaive, h = 1, power = 2)
 #Both tests reject H0 meaning neither the ARIMA and ETS nor the 
 #ARIMA and snaive models have equal forecast accuracy
 #If I were the liquor store chain, I would use the ARIMA model
+
+liquor_combo_fc <- liquor_cv_fit |>
+  mutate(combo = (arima + ets) / 2) |>
+  forecast(h = 1)
+
+liquor_combo_fc |>
+  accuracy(liquor, measures = list(RMSE = RMSE, MAE = MAE)) |>
+  knitr::kable(digits = 2)
+
+#Combo has an RMSE and an MAE between the two models that go into it
+
+cor(liquor_errs$arima, liquor_errs$ets)
+
+#Combination didn't beat the ARIMA model because the ARIMA and ETS 
+#model do not have equal forecast accuracy, and the correlation between
+#the ARIMA error terms and the ETS error terms is quite high
