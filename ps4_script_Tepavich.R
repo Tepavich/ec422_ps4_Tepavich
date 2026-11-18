@@ -262,3 +262,139 @@ forecast::dm.test(e_var4, e_bvar, h = 1, power = 2)
 #findings in part 4.3b where the bvar forecasted more accurately for 
 #inflation.
 
+md_raw <- read_csv("data/fredmd_2026-09.csv", show_col_types = FALSE)
+tcode <- unlist(md_raw[1, -1])
+md <- md_raw[-1, ] |> mutate(date = as.Date(sasdate, "%m/%d/%Y"))
+
+transform_series <- function(x, code) {
+  d <- function(v) c(NA, diff(v))
+  switch(as.character(code),
+         "1" = x,                      # level
+         "2" = d(x),                   # first difference
+         "3" = d(d(x)),                # second difference
+         "4" = log(x),                 # log
+         "5" = 100 * d(log(x)),        # growth rate
+         "6" = 100 * d(d(log(x))),     # change in the growth rate
+         "7" = d(x / dplyr::lag(x) - 1))
+}
+
+fm <- map2_dfc(md[names(tcode)], tcode, transform_series) |>
+  mutate(date = md$date, .before = 1) |>
+  filter(date >= as.Date("1960-03-01"), date <= as.Date("2019-12-01"))
+
+fm <- fm[, colSums(is.na(fm)) == 0]
+
+dim(fm)
+
+tcode[c("INDPRO", "PAYEMS", "CPIAUCSL", "FEDFUNDS")]
+
+#INDPRO: 5 (growth rate, first difference) 
+#PAYEMS: 5 (growth rate, first difference)
+#CPIAUCSL: 5 (growth rate, second difference)
+#FEDFUNDS: 2 (first difference)
+#the FEDFUNDS series is the only one that is not transformed to a growth 
+#rate because it is already a rate. The other three series are transformed 
+#to growth rates to make them stationary and to focus on the percentage changes 
+#rather than the absolute levels.
+
+Z <- fm |> select(-date) |> as.matrix()
+
+pc <- prcomp(scale(Z))
+
+summary(pc)$importance[, 1:5]
+
+#the first three factors explain 29.45% of the total variation in all series
+
+F1 <- pc$x[, 1] * sign(cor(pc$x[, 1], fm$INDPRO))
+
+tibble(date = fm$date, F1 = F1) |>
+  ggplot(aes(date, F1)) +
+  geom_line() +
+  labs(title = "First Factor from FRED-MD", x = NULL, y = NULL) +
+  theme_minimal()
+
+sort(abs(cor(pc$x[, 1], Z))[1, ], decreasing = TRUE)[1:8]
+sort(abs(cor(pc$x[, 2], Z))[1, ], decreasing = TRUE)[1:8]
+
+#First Factor
+#1. PAYEMS — 0.842
+#2. IPMANSICS — 0.840
+#3. USGOOD — 0.839
+#4. INDPRO — 0.822
+#5. MANEMP — 0.803
+#6. IPFPNSS — 0.790
+#7. CUMFNS — 0.778
+#8. DMANEMP — 0.777
+#Second factor
+#1. CUSR0000SAC — 0.747
+#2. DNDGRG3M086SBEA — 0.739
+#3. CUSR0000SA0L2 — 0.728
+#4. CPIAUCSL — 0.720
+#5. CUSR0000SA0L5 — 0.703
+#6. CPITRNSL — 0.681
+#7. PCEPI — 0.680
+#8. CPIULFSL — 0.657
+#The first factor appears to represent real economic activity, particularly 
+#employment and industrial production, while the second factor appears to 
+#represent inflation and changes in consumer prices.
+
+ip <- fm$INDPRO
+n <- nrow(Z)
+init <- which(fm$date == as.Date("1989-12-01"))
+
+e_ar <- NULL
+e_fa <- NULL
+for (T in init:(n - 1)) {
+  F_T <- prcomp(scale(Z[1:T, ]))$x[, 1:3]         # factors using data through T
+  d <- data.frame(y_next = ip[2:T], y = ip[1:(T - 1)], F_T[1:(T - 1), ])
+  new <- data.frame(y = ip[T], t(F_T[T, ]))
+  e_ar <- c(e_ar, ip[T + 1] - predict(lm(y_next ~ y, d), new))
+  e_fa <- c(e_fa, ip[T + 1] - predict(lm(y_next ~ ., d), new))
+}
+
+c(RMSE_AR = sqrt(mean(e_ar^2)), RMSE_FA = sqrt(mean(e_fa^2)))
+
+#It would be cheating to estimate the factors once, using the full sample,
+#and use those in the horse race because using the full sample to estimate the 
+#factors introduces data leakage.
+
+direct_race <- function(series, h = 12, r = 3) {
+  lv <- md |>
+    mutate(log_x = log(.data[[series]]),
+           g = 100 * (log_x - lag(log_x))) |>
+    filter(date >= as.Date("1960-03-01"), date <= as.Date("2019-12-01"))
+  yh <- 100 * (lead(lv$log_x, h) - lv$log_x)      # growth over the next h months
+  g  <- lv$g                                      # growth over the latest month
+  
+  e_ar <- NULL
+  e_fa <- NULL
+  for (T in init:(n - h)) {
+    F_T <- prcomp(scale(Z[1:T, ]))$x[, 1:r, drop = FALSE]
+    i <- 1:(T - h)
+    d <- data.frame(yh = yh[i], g = g[i], F_T[i, , drop = FALSE])
+    new <- data.frame(g = g[T], F_T[T, , drop = FALSE])
+    e_ar <- c(e_ar, yh[T] - predict(lm(yh ~ g, d), new))
+    e_fa <- c(e_fa, yh[T] - predict(lm(yh ~ ., d), new))
+  }
+  tibble(series, forecasts = length(e_ar),
+         RMSE_AR = sqrt(mean(e_ar^2)), RMSE_FA = sqrt(mean(e_fa^2)),
+         MAE_AR = mean(abs(e_ar)), MAE_FA = mean(abs(e_fa)),
+         DM_pvalue = forecast::dm.test(e_ar, e_fa, h = h, power = 2,
+                                       varestimator = "bartlett")$p.value)
+}
+
+direct_race("CPIAUCSL")
+
+#The factors improve the forecast of 12-month CPI inflation. 
+#The AR model produces an RMSE of 2.11, while the factor-augmented model 
+#produces an RMSE of 1.89. This represents an approximately 10.4% 
+#reduction in RMSE when the three factors are included. The MAE also decreases 
+#from 1.58 to 1.35, further indicating improved forecasting accuracy. 
+#The Diebold–Mariano test produces a p-value of 0.000443, allowing us to 
+#reject the null hypothesis of equal predictive accuracy at the 5% significance
+#level. Therefore, the factor-augmented model provides a statistically 
+#significant improvement over the AR model in forecasting 12-month 
+#CPI inflation.
+
+
+
